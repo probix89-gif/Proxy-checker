@@ -18,7 +18,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 # ========== CONFIGURATION ==========
-BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"          # Replace with your token
+BOT_TOKEN = "8582836532:AAE7IXU5jrxPS1l-Z1DkLYQMwoDtekv9gsE"          # Replace with your token
 API_URL = "http://199.244.48.163:8025/paypal_donate?cc={}"
 MAX_WORKERS = 200                               # max concurrent API calls
 TIMEOUT = 15                                    # HTTP request timeout
