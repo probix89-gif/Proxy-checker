@@ -160,7 +160,7 @@ thread_pool = ThreadPoolExecutor(max_workers=50, thread_name_prefix="worker")
 # ============================================================================
 # Telegram Bot Token
 # ============================================================================
-TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TOKEN = "8035362875:AAH3eG2nNRLnzKVt-wyAzgcF90xgzkeja-g"
 bot = telebot.TeleBot(TOKEN, threaded=True, num_threads=100)
 
 ADMIN_ID = 7590180047
