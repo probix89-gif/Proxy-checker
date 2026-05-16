@@ -408,7 +408,7 @@ async def post_shutdown(application: Application):
 
 def main():
     import os
-    TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+    TOKEN = os.environ.get("8582836532:AAE7IXU5jrxPS1l-Z1DkLYQMwoDtekv9gsE")
     if not TOKEN:
         raise ValueError("Please set TELEGRAM_BOT_TOKEN environment variable.")
 
