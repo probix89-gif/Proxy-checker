@@ -160,10 +160,11 @@ thread_pool = ThreadPoolExecutor(max_workers=50, thread_name_prefix="worker")
 # ============================================================================
 # Telegram Bot Token
 # ============================================================================
-TOKEN = "8626025191:AAFGtpDgtl-jfRTGvVejOMelDEFGQGPJoGI"
+TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 bot = telebot.TeleBot(TOKEN, threaded=True, num_threads=100)
 
 ADMIN_ID = 7590180047
+ADMIN_IDS = {7590180047, 6535041385}
 
 REQUIRED_CHANNELS = [
     {"name": "Main Channel", "username": "@dlxdropp", "link": "https://t.me/+ARqILQuYOckyMzQ8"},
@@ -1518,28 +1519,7 @@ def get_bin_info(bin_code):
 # KANAL KONTROLÜ
 # ============================================================================
 def check_membership(user_id):
-    cache_key = f"membership:{user_id}"
-    cached = cache.get(cache_key)
-    if cached is not None:
-        return cached
-    
-    try:
-        for channel in REQUIRED_CHANNELS:
-            if channel['username']:
-                try:
-                    member = bot.get_chat_member(channel['username'], user_id)
-                    if member.status not in ['member', 'administrator', 'creator']:
-                        cache.set(cache_key, False, 300)
-                        return False
-                except Exception as e:
-                    logger.error(f"Public channel check error for {channel.get('username')}: {e}")
-                    cache.set(cache_key, False, 300)
-                    return False
-        cache.set(cache_key, True, 300)
-        return True
-    except Exception as e:
-        logger.error(f"Membership check error: {e}")
-        return False
+    return True
 
 def get_channels_markup():
     markup = types.InlineKeyboardMarkup(row_width=1)
@@ -3872,7 +3852,7 @@ def get_braintree_gateways_page(page):
 def cmd_broadcast(message):
     user_id = message.from_user.id
     
-    if user_id != ADMIN_ID:
+    if user_id not in ADMIN_IDS:
         bot.reply_to(message, "Bu komutu sadece admin kullanabilir!")
         return
     
@@ -3994,7 +3974,7 @@ Country ➜ {bin_info['country']}
     output += f"""
 Time ➜ {elapsed}s
 Checked by ➜ {user_name}
-Bot by ➜ @deluxe_cc
+Bot by ➜ @NEVER_DIE8
 """
     
     bot.send_message(chat_id, output)
@@ -4002,7 +3982,7 @@ Bot by ➜ @deluxe_cc
 def animated_check(message, card, gateway_name, auth_func, credit_cost, amount=None):
     user_id = message.from_user.id
     
-    if not check_rate_limit(user_id) and user_id != ADMIN_ID:
+    if not check_rate_limit(user_id) and user_id not in ADMIN_IDS:
         bot.reply_to(message, "⏱️ Please wait 2 seconds between commands!")
         return
     
@@ -4014,7 +3994,7 @@ def animated_check(message, card, gateway_name, auth_func, credit_cost, amount=N
     user_info = credit_manager.get_user_info(user_id)
     plan = user_info['plan'] if user_info else 'Free'
     
-    if user_credit < credit_cost and user_id != ADMIN_ID:
+    if user_credit < credit_cost and user_id not in ADMIN_IDS:
         show_insufficient_credit(message, user_id)
         return
     
@@ -4073,7 +4053,7 @@ def animated_check(message, card, gateway_name, auth_func, credit_cost, amount=N
     elif 'KILL' in result:
         kill = True
     
-    if user_id != ADMIN_ID:
+    if user_id not in ADMIN_IDS:
         credit_manager.deduct_credit(user_id, credit_cost, approved, charged)
     
     bin_code = card.split('|')[0][:6]
@@ -4151,7 +4131,7 @@ Country ➜ {bin_info['country']}
         output += f"""
 Time ➜ {elapsed}s
 Checked by ➜ {first_name}
-Bot by ➜ @deluxe_cc
+Bot by ➜ @NEVER_DIE8
 """
         
         try:
@@ -4266,7 +4246,7 @@ def process_txt_file(message, gateway_name, auth_func, amount=None):
         total_cost = len(cards) * cost_per_card
         user_credit = credit_manager.get_credit(user_id)
         
-        if user_credit < total_cost and user_id != ADMIN_ID:
+        if user_credit < total_cost and user_id not in ADMIN_IDS:
             bot.reply_to(message, f"❌ Yetersiz kredi! İhtiyacınız olan: {total_cost} kredi, mevcut: {user_credit} kredi")
             return
         
@@ -4362,7 +4342,7 @@ def process_txt_file(message, gateway_name, auth_func, amount=None):
                     status_text = "DECLINED"
                     declined += 1
                 
-                if user_id != ADMIN_ID:
+                if user_id not in ADMIN_IDS:
                     credit_manager.deduct_credit(user_id, cost_per_card, approved_this, charged_this)
                 
                 if 'incorrect_cvc' in result.lower() or 'security code' in result.lower():
@@ -4493,7 +4473,7 @@ def start(message):
     welcome_msg = """
 Welcome to DlxChecker 👋
 
-To get premium on the bot, contact @deluxe_cc
+To get premium on the bot, contact @NEVER_DIE8
 
 /premium You can make purchases from within the bot.
     """
@@ -4924,7 +4904,7 @@ New Balance ➜ {new_credit}
 def cmd_allah_redeem(message):
     user_id = message.from_user.id
     
-    if user_id != ADMIN_ID:
+    if user_id not in ADMIN_IDS:
         bot.reply_to(message, "❌ Only owner can use this command!")
         return
     
@@ -4947,7 +4927,7 @@ After selecting, you can specify how many codes to generate.
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('gen_redeem_'))
 def handle_redeem_generation(call):
-    if call.from_user.id != ADMIN_ID:
+    if call.from_user.id not in ADMIN_IDS:
         bot.answer_callback_query(call.id, "Only owner can use this!", show_alert=True)
         return
     
@@ -5018,7 +4998,7 @@ Total Credits: {count * PLANS[plan_key]['credit']}
 def cmd_ban(message):
     user_id = message.from_user.id
     
-    if user_id != ADMIN_ID:
+    if user_id not in ADMIN_IDS:
         bot.reply_to(message, "❌ Only owner can use this command!")
         return
     
@@ -5060,7 +5040,7 @@ Duration: {duration_text}
 def cmd_unban(message):
     user_id = message.from_user.id
     
-    if user_id != ADMIN_ID:
+    if user_id not in ADMIN_IDS:
         bot.reply_to(message, "❌ Only owner can use this command!")
         return
     
@@ -5099,7 +5079,7 @@ User ID: {target_id}
 def cmd_totalmembers(message):
     user_id = message.from_user.id
     
-    if user_id != ADMIN_ID:
+    if user_id not in ADMIN_IDS:
         bot.reply_to(message, "❌ Only owner can use this command!")
         return
     
@@ -5178,7 +5158,7 @@ Caption: {caption}
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('approve_hit_') or call.data.startswith('reject_hit_'))
 def handle_hit_approval(call):
-    if call.from_user.id != ADMIN_ID:
+    if call.from_user.id not in ADMIN_IDS:
         bot.answer_callback_query(call.id, "Only admin can do this!", show_alert=True)
         return
     
@@ -5228,7 +5208,7 @@ Credits: +20
 def cmd_userinfo(message):
     user_id = message.from_user.id
     
-    if user_id != ADMIN_ID:
+    if user_id not in ADMIN_IDS:
         bot.reply_to(message, "❌ This command is only for admin!")
         return
     
@@ -5306,7 +5286,7 @@ def cmd_userinfo(message):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('admin_'))
 def admin_callback_handler(call):
-    if call.from_user.id != ADMIN_ID:
+    if call.from_user.id not in ADMIN_IDS:
         bot.answer_callback_query(call.id, "❌ You are not authorized!", show_alert=True)
         return
     
@@ -6423,7 +6403,7 @@ def cmd_bin(message):
 def cmd_register(message):
     user_id = message.from_user.id
     
-    if user_id != ADMIN_ID:
+    if user_id not in ADMIN_IDS:
         bot.reply_to(message, "❌ Only admin can use this command!")
         return
     
@@ -6864,7 +6844,7 @@ Use: /kill [card]
             welcome_msg = """
 Welcome to DlxChecker 👋
 
-To get premium on the bot, contact @deluxe_cc
+To get premium on the bot, contact @NEVER_DIE8
 
 /premium You can make purchases from within the bot.
             """
